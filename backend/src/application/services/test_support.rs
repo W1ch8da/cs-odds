@@ -13,16 +13,18 @@ use crate::{
     application::{
         error::{AppError, AppResult},
         ports::{
-            inbound::{EventKind, Page, TicketSort, TicketSummary, TimelineItem, UserRef, ViewCounts},
+            inbound::{AttachmentView, EventKind, Page, TicketSort, TicketSummary, TimelineItem, UserRef, ViewCounts},
             outbound::{
-                AccessTokenCodec, Clock, IssuedToken, NewComment, NewEvent, NewTicket, OpaqueTokenGenerator,
-                PasswordHasher, RefreshTokenRecord, RefreshTokenRepository, TicketQuery, TicketRepository,
+                AccessTokenCodec, AttachmentRecord, EmailOutbox, QueuedEmail, NewEmail, AttachmentRepository, Clock, FileStorage, IssuedToken,
+                NewAttachment, NewComment, NewEvent, NewTicket, OpaqueTokenGenerator, PasswordHasher, PresignedPut,
+                RefreshTokenRecord, RefreshTokenRepository, TicketAttachment, TicketQuery, TicketRepository,
                 UserRepository,
             },
         },
         principal::Principal,
     },
     domain::{
+        attachment::AttachmentId,
         ticket::{Status, Ticket, TicketId, TicketNumber},
         user::{Email, NewUser, PersonName, Role, User, UserId},
     },
@@ -162,11 +164,49 @@ impl Clock for FixedClock {
     }
 }
 
-#[derive(Default)]
 pub struct TestEnv {
     pub users: Arc<InMemoryUsers>,
     pub refresh_tokens: Arc<InMemoryRefreshTokens>,
+    pub tickets: Arc<InMemoryTickets>,
+    pub attachments: Arc<InMemoryAttachments>,
+    pub storage: Arc<FakeStorage>,
+    pub outbox: Arc<InMemoryOutbox>,
     pub clock: Arc<FixedClock>,
+}
+
+impl TestEnv {
+    /// A ticket service wired to this environment's fakes.
+    pub fn ticket_service(&self) -> crate::application::services::TicketService {
+        use crate::application::services::notifications::{NotificationSettings, Notifier};
+        let notifier = Notifier::new(
+            self.outbox.clone(),
+            NotificationSettings { app_url: "http://app.test".into(), mail_domain: "cs-odds.test".into() },
+        );
+        crate::application::services::TicketService::new(
+            self.tickets.clone(),
+            self.users.clone(),
+            self.attachments.clone(),
+            self.storage.clone(),
+            Arc::new(notifier),
+            self.clock.clone(),
+        )
+    }
+}
+
+impl Default for TestEnv {
+    fn default() -> Self {
+        let users = Arc::new(InMemoryUsers::default());
+        let attachments = Arc::new(InMemoryAttachments::default());
+        Self {
+            tickets: Arc::new(InMemoryTickets::new(users.clone(), attachments.clone())),
+            users,
+            attachments,
+            refresh_tokens: Arc::default(),
+            storage: Arc::default(),
+            outbox: Arc::default(),
+            clock: Arc::default(),
+        }
+    }
 }
 
 impl TestEnv {
@@ -203,12 +243,13 @@ struct TicketState {
 /// Postgres ordering for the fixed clock used in tests.
 pub struct InMemoryTickets {
     users: Arc<InMemoryUsers>,
+    attachments: Arc<InMemoryAttachments>,
     state: Mutex<TicketState>,
 }
 
 impl InMemoryTickets {
-    pub fn new(users: Arc<InMemoryUsers>) -> Self {
-        Self { users, state: Mutex::default() }
+    pub fn new(users: Arc<InMemoryUsers>, attachments: Arc<InMemoryAttachments>) -> Self {
+        Self { users, attachments, state: Mutex::default() }
     }
 
     pub fn last_query(&self) -> TicketQuery {
@@ -245,6 +286,7 @@ impl InMemoryTickets {
 #[async_trait]
 impl TicketRepository for InMemoryTickets {
     async fn insert(&self, new: NewTicket) -> AppResult<Ticket> {
+        let attachment_ids = new.attachment_ids.clone();
         let mut state = self.state.lock().unwrap();
         let ticket = Ticket {
             id: TicketId(Uuid::new_v4()),
@@ -261,11 +303,16 @@ impl TicketRepository for InMemoryTickets {
             resolved_at: None,
         };
         state.tickets.push(ticket.clone());
+        self.attachments.link(&attachment_ids, ticket.id, None, false)?;
         Ok(ticket)
     }
 
     async fn find_by_number(&self, number: TicketNumber) -> AppResult<Option<Ticket>> {
         Ok(self.state.lock().unwrap().tickets.iter().find(|t| t.number == number).cloned())
+    }
+
+    async fn find_by_id(&self, id: TicketId) -> AppResult<Option<Ticket>> {
+        Ok(self.state.lock().unwrap().tickets.iter().find(|t| t.id == id).cloned())
     }
 
     async fn update(&self, ticket: &Ticket, events: &[NewEvent]) -> AppResult<()> {
@@ -280,7 +327,9 @@ impl TicketRepository for InMemoryTickets {
     async fn add_comment(&self, ticket: &Ticket, comment: NewComment, events: &[NewEvent]) -> AppResult<()> {
         let mut state = self.state.lock().unwrap();
         Self::save(&mut state, ticket);
-        state.entries.push((ticket.id, Entry::Comment(Uuid::new_v4(), comment)));
+        let comment_id = Uuid::new_v4();
+        self.attachments.link(&comment.attachment_ids, ticket.id, Some(comment_id), comment.internal)?;
+        state.entries.push((ticket.id, Entry::Comment(comment_id, comment)));
         for e in events {
             state.entries.push((ticket.id, Entry::Event(Uuid::new_v4(), e.clone())));
         }
@@ -329,6 +378,7 @@ impl TicketRepository for InMemoryTickets {
                     author: self.user_ref(c.author_id),
                     body: c.body.as_str().to_owned(),
                     internal: c.internal,
+                    attachments: Vec::new(),
                     created_at: c.created_at,
                 }),
                 Entry::Comment(..) => {}
@@ -364,5 +414,122 @@ impl TicketRepository for InMemoryTickets {
             open: state.tickets.iter().filter(active).count() as i64,
             solved: state.tickets.iter().filter(|t| !t.status.is_active()).count() as i64,
         })
+    }
+}
+
+#[derive(Default)]
+pub struct InMemoryAttachments(Mutex<Vec<AttachmentRecord>>);
+
+impl InMemoryAttachments {
+    /// Links drafts, failing like the real repository if any was already used.
+    fn link(&self, ids: &[AttachmentId], ticket_id: TicketId, comment_id: Option<Uuid>, internal: bool) -> AppResult<()> {
+        let mut rows = self.0.lock().unwrap();
+        for id in ids {
+            let row = rows
+                .iter_mut()
+                .find(|r| r.view.id == *id && r.ticket_id.is_none())
+                .ok_or_else(|| AppError::Conflict("already linked".into()))?;
+            row.ticket_id = Some(ticket_id);
+            row.comment_id = comment_id;
+            row.internal = internal;
+        }
+        Ok(())
+    }
+}
+
+#[async_trait]
+impl AttachmentRepository for InMemoryAttachments {
+    async fn insert_draft(&self, a: NewAttachment) -> AppResult<AttachmentRecord> {
+        let record = AttachmentRecord {
+            view: AttachmentView {
+                id: a.id,
+                filename: a.filename.as_str().to_owned(),
+                content_type: a.content_type.as_str().to_owned(),
+                size: a.size,
+                created_at: a.created_at,
+            },
+            uploader_id: a.uploader_id,
+            storage_key: a.storage_key,
+            ticket_id: None,
+            comment_id: None,
+            internal: false,
+        };
+        self.0.lock().unwrap().push(record.clone());
+        Ok(record)
+    }
+
+    async fn find(&self, id: AttachmentId) -> AppResult<Option<AttachmentRecord>> {
+        Ok(self.0.lock().unwrap().iter().find(|r| r.view.id == id).cloned())
+    }
+
+    async fn find_many(&self, ids: &[AttachmentId]) -> AppResult<Vec<AttachmentRecord>> {
+        Ok(self.0.lock().unwrap().iter().filter(|r| ids.contains(&r.view.id)).cloned().collect())
+    }
+
+    async fn for_ticket(&self, ticket_id: TicketId) -> AppResult<Vec<TicketAttachment>> {
+        Ok(self
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.ticket_id == Some(ticket_id))
+            .map(|r| TicketAttachment { view: r.view.clone(), comment_id: r.comment_id })
+            .collect())
+    }
+}
+
+/// Object storage in memory. Call `simulate_upload` to mimic the client's PUT.
+#[derive(Default)]
+pub struct FakeStorage(Mutex<std::collections::HashMap<String, i64>>);
+
+impl FakeStorage {
+    pub fn simulate_upload(&self, id: AttachmentId, size: i64) {
+        self.0.lock().unwrap().insert(format!("attachments/{}", id.0), size);
+    }
+}
+
+#[async_trait]
+impl FileStorage for FakeStorage {
+    async fn presign_put(&self, key: &str, content_type: &str, _ttl: Duration) -> AppResult<PresignedPut> {
+        Ok(PresignedPut {
+            url: format!("https://storage.test/{key}?signature=put"),
+            headers: vec![("content-type".into(), content_type.into())],
+        })
+    }
+
+    async fn presign_get(&self, key: &str, filename: &str, _content_type: &str, _ttl: Duration) -> AppResult<String> {
+        Ok(format!("https://storage.test/{key}?download={filename}"))
+    }
+
+    async fn object_size(&self, key: &str) -> AppResult<Option<i64>> {
+        Ok(self.0.lock().unwrap().get(key).copied())
+    }
+}
+
+/// Records queued emails.
+#[derive(Default)]
+pub struct InMemoryOutbox(pub Mutex<Vec<NewEmail>>);
+
+impl InMemoryOutbox {
+    /// `(to, subject)` of everything queued so far, then clears the list.
+    pub fn take(&self) -> Vec<(String, String)> {
+        std::mem::take(&mut *self.0.lock().unwrap()).into_iter().map(|e| (e.to_email, e.subject)).collect()
+    }
+}
+
+#[async_trait]
+impl EmailOutbox for InMemoryOutbox {
+    async fn enqueue(&self, emails: &[NewEmail]) -> AppResult<()> {
+        self.0.lock().unwrap().extend_from_slice(emails);
+        Ok(())
+    }
+    async fn claim_due(&self, _: Duration, _: i64) -> AppResult<Vec<QueuedEmail>> {
+        Ok(Vec::new())
+    }
+    async fn mark_sent(&self, _: Uuid) -> AppResult<()> {
+        Ok(())
+    }
+    async fn mark_failed(&self, _: Uuid, _: &str, _: Option<Duration>) -> AppResult<()> {
+        Ok(())
     }
 }

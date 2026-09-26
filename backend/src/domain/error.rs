@@ -13,6 +13,8 @@ pub enum DomainError {
     InvalidValue(String),
     #[error("{0}")]
     InvalidText(&'static str),
+    #[error("{0}")]
+    InvalidFile(&'static str),
     #[error("This ticket is closed, so it can't be changed. Open a new ticket instead.")]
     TicketClosed,
 }

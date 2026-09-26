@@ -2,9 +2,11 @@ use async_trait::async_trait;
 use chrono::{DateTime, Utc};
 use uuid::Uuid;
 
+use super::attachments::AttachmentView;
 use crate::{
     application::{error::AppResult, principal::Principal},
     domain::{
+        attachment::AttachmentId,
         ticket::{Channel, Priority, Status, TicketId, TicketNumber},
         user::{Role, UserId},
     },
@@ -22,6 +24,8 @@ pub struct CreateTicketInput {
     pub requester_name: Option<String>,
     /// Staff only.
     pub assignee_id: Option<UserId>,
+    /// Uploaded drafts to attach to the description.
+    pub attachment_ids: Vec<AttachmentId>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -69,6 +73,8 @@ pub struct AddCommentInput {
     pub internal: bool,
     /// Staff only: status to set together with the reply.
     pub status_after: Option<Status>,
+    /// Uploaded drafts to attach to this message.
+    pub attachment_ids: Vec<AttachmentId>,
 }
 
 // ---------- Read models ----------
@@ -119,6 +125,7 @@ pub enum TimelineItem {
         author: UserRef,
         body: String,
         internal: bool,
+        attachments: Vec<AttachmentView>,
         created_at: DateTime<Utc>,
     },
     /// For assignee changes the values are display names, otherwise codes
@@ -137,6 +144,8 @@ pub enum TimelineItem {
 pub struct TicketDetail {
     pub summary: TicketSummary,
     pub description: String,
+    /// Files attached to the description.
+    pub attachments: Vec<AttachmentView>,
     pub resolved_at: Option<DateTime<Utc>>,
     /// Oldest first. Customers get public replies and status changes only.
     pub timeline: Vec<TimelineItem>,

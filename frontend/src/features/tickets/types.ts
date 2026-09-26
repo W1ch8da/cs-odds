@@ -1,3 +1,4 @@
+import type { Attachment } from "@/features/attachments/types";
 import type { Role } from "@/features/auth/types";
 
 export type TicketStatus = "open" | "pending" | "on_hold" | "solved" | "closed";
@@ -24,6 +25,7 @@ export type TimelineComment = {
   author: UserRef;
   body: string;
   internal: boolean;
+  attachments: Attachment[];
   createdAt: string;
 };
 
@@ -42,6 +44,8 @@ export type TimelineItem = TimelineComment | TimelineEvent;
 
 export type TicketDetail = TicketSummary & {
   description: string;
+  /** Files attached to the description. */
+  attachments: Attachment[];
   resolvedAt: string | null;
   timeline: TimelineItem[];
   requesterTicketCount: number;
@@ -68,6 +72,7 @@ export type CreateTicketRequest = {
   requesterEmail?: string;
   requesterName?: string;
   assigneeId?: string;
+  attachmentIds?: string[];
 };
 
 export type UpdateTicketRequest = {
@@ -83,4 +88,5 @@ export type AddCommentRequest = {
   body: string;
   internal?: boolean;
   status?: TicketStatus;
+  attachmentIds?: string[];
 };

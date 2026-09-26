@@ -7,6 +7,7 @@ use crate::{
         ports::inbound::{EventKind, Page, TicketSort, TicketSummary, TimelineItem, ViewCounts},
     },
     domain::{
+        attachment::AttachmentId,
         ticket::{Channel, MessageBody, Priority, Status, Subject, Ticket, TicketId, TicketNumber},
         user::UserId,
     },
@@ -21,6 +22,8 @@ pub struct NewTicket {
     pub requester_id: UserId,
     pub assignee_id: Option<UserId>,
     pub created_at: DateTime<Utc>,
+    /// Verified drafts to link to the ticket description.
+    pub attachment_ids: Vec<AttachmentId>,
 }
 
 #[derive(Debug, Clone)]
@@ -29,6 +32,8 @@ pub struct NewComment {
     pub body: MessageBody,
     pub internal: bool,
     pub created_at: DateTime<Utc>,
+    /// Verified drafts to link to this comment.
+    pub attachment_ids: Vec<AttachmentId>,
 }
 
 /// An audit entry. Assignee values are user ids; the read side resolves names.
@@ -55,12 +60,14 @@ pub struct TicketQuery {
     pub offset: i64,
 }
 
-/// Each write method is one transaction, so a ticket and its history never
-/// disagree.
+/// Each write method is one transaction, so a ticket, its history and its
+/// attachments never disagree. Linking fails with `Conflict` if an
+/// attachment was linked concurrently.
 #[async_trait]
 pub trait TicketRepository: Send + Sync {
     async fn insert(&self, ticket: NewTicket) -> AppResult<Ticket>;
     async fn find_by_number(&self, number: TicketNumber) -> AppResult<Option<Ticket>>;
+    async fn find_by_id(&self, id: TicketId) -> AppResult<Option<Ticket>>;
     /// Saves the ticket's current fields and appends the events.
     async fn update(&self, ticket: &Ticket, events: &[NewEvent]) -> AppResult<()>;
     /// Adds the comment, saves the ticket and appends the events.

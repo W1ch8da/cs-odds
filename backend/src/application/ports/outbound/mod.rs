@@ -1,6 +1,9 @@
 mod access_token_codec;
+mod attachment_repository;
 mod clock;
 mod database_probe;
+mod email;
+mod file_storage;
 mod password_hasher;
 mod refresh_token_repository;
 mod ticket_repository;
@@ -8,8 +11,11 @@ mod token_generator;
 mod user_repository;
 
 pub use access_token_codec::{AccessTokenCodec, IssuedToken};
+pub use attachment_repository::{AttachmentRecord, AttachmentRepository, NewAttachment, TicketAttachment};
 pub use clock::Clock;
 pub use database_probe::DatabaseProbe;
+pub use email::{EmailOutbox, MailSender, NewEmail, QueuedEmail};
+pub use file_storage::{FileStorage, PresignedPut};
 pub use password_hasher::PasswordHasher;
 pub use refresh_token_repository::{RefreshTokenRecord, RefreshTokenRepository};
 pub use ticket_repository::{NewComment, NewEvent, NewTicket, TicketQuery, TicketRepository};

@@ -18,6 +18,7 @@ use crate::{
         ports::inbound::{AddCommentInput, AssigneeFilter, CreateTicketInput, ListTicketsInput, TicketSort, UpdateTicketInput},
     },
     domain::{
+        attachment::AttachmentId,
         ticket::{Priority, Status, TicketNumber},
         user::UserId,
     },
@@ -89,6 +90,7 @@ pub async fn create(
         requester_email: body.requester_email,
         requester_name: body.requester_name,
         assignee_id: body.assignee_id.map(UserId),
+        attachment_ids: body.attachment_ids.into_iter().map(AttachmentId).collect(),
     };
     let ticket = state.tickets.create(&actor, input).await?;
     Ok((StatusCode::CREATED, Json(ticket.into())))
@@ -126,6 +128,7 @@ pub async fn add_comment(
         body: body.body,
         internal: body.internal,
         status_after: parse_opt(body.status.as_deref())?,
+        attachment_ids: body.attachment_ids.into_iter().map(AttachmentId).collect(),
     };
     let ticket = state.tickets.add_comment(&actor, ticket_number(&number)?, input).await?;
     Ok((StatusCode::CREATED, Json(ticket.into())))

@@ -1,5 +1,7 @@
 //! sqlx/Postgres adapter. The only place that knows about `sqlx`.
 
+mod attachment_repository;
+mod email_outbox;
 mod health_probe;
 mod refresh_token_repository;
 mod ticket_repository;
@@ -11,6 +13,8 @@ use sqlx::{PgPool, postgres::PgPoolOptions};
 
 use crate::application::error::AppError;
 
+pub use attachment_repository::PgAttachmentRepository;
+pub use email_outbox::PgEmailOutbox;
 pub use health_probe::PgDatabaseProbe;
 pub use refresh_token_repository::PgRefreshTokenRepository;
 pub use ticket_repository::PgTicketRepository;

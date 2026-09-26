@@ -2,12 +2,16 @@ use std::net::SocketAddr;
 
 use anyhow::{Context, bail};
 
+use crate::adapters::outbound::s3::S3Settings;
+
 #[derive(Clone, Debug)]
 pub struct Config {
     pub database_url: String,
     pub bind_addr: SocketAddr,
     pub frontend_origin: String,
     pub auth: AuthConfig,
+    pub storage: S3Settings,
+    pub mail: MailConfig,
     pub bootstrap_admin: Option<BootstrapAdmin>,
 }
 
@@ -28,6 +32,28 @@ impl std::fmt::Debug for AuthConfig {
             .field("refresh_ttl_days", &self.refresh_ttl_days)
             .field("cookie_secure", &self.cookie_secure)
             .finish()
+    }
+}
+
+#[derive(Clone)]
+pub struct MailConfig {
+    /// e.g. `smtp://localhost:1025` (Mailpit) or `smtps://user:pass@smtp.example.com`.
+    pub smtp_url: String,
+    /// Sender, e.g. `CS-ODDS Support <support@cs-odds.local>`.
+    pub from: String,
+    /// Base URL of the web app, for links in emails.
+    pub app_url: String,
+    pub worker_interval_seconds: u64,
+}
+
+// The SMTP URL can contain a password.
+impl std::fmt::Debug for MailConfig {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("MailConfig")
+            .field("from", &self.from)
+            .field("app_url", &self.app_url)
+            .field("worker_interval_seconds", &self.worker_interval_seconds)
+            .finish_non_exhaustive()
     }
 }
 
@@ -73,6 +99,23 @@ impl Config {
             cookie_secure: parse_var("COOKIE_SECURE", false)?,
         };
 
+        let endpoint = var("S3_ENDPOINT").unwrap_or_else(|| "http://localhost:9000".into());
+        let storage = S3Settings {
+            public_endpoint: var("S3_PUBLIC_ENDPOINT").unwrap_or_else(|| endpoint.clone()),
+            endpoint,
+            region: var("S3_REGION").unwrap_or_else(|| "us-east-1".into()),
+            bucket: var("S3_BUCKET").unwrap_or_else(|| "cs-odds-attachments".into()),
+            access_key: var("S3_ACCESS_KEY").context("S3_ACCESS_KEY must be set (MinIO: the root user)")?,
+            secret_key: var("S3_SECRET_KEY").context("S3_SECRET_KEY must be set (MinIO: the root password)")?,
+        };
+
+        let mail = MailConfig {
+            smtp_url: var("SMTP_URL").unwrap_or_else(|| "smtp://localhost:1025".into()),
+            from: var("MAIL_FROM").unwrap_or_else(|| "CS-ODDS Support <support@cs-odds.local>".into()),
+            app_url: var("APP_URL").unwrap_or_else(|| frontend_origin.clone()),
+            worker_interval_seconds: parse_var("EMAIL_WORKER_INTERVAL_SECONDS", 5)?,
+        };
+
         let bootstrap_admin = match (var("ADMIN_EMAIL"), var("ADMIN_PASSWORD")) {
             (Some(email), Some(password)) => Some(BootstrapAdmin {
                 email,
@@ -83,6 +126,6 @@ impl Config {
             _ => bail!("set both ADMIN_EMAIL and ADMIN_PASSWORD, or neither"),
         };
 
-        Ok(Self { database_url, bind_addr, frontend_origin, auth, bootstrap_admin })
+        Ok(Self { database_url, bind_addr, frontend_origin, auth, storage, mail, bootstrap_admin })
     }
 }

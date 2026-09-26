@@ -12,6 +12,8 @@ import { FormField, fieldA11y } from "@/components/forms/FormField";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { DropZone, UploadList } from "@/features/attachments/components";
+import { useUploads } from "@/features/attachments/useUploads";
 import { IMPACT_OPTIONS } from "@/features/tickets/labels";
 import { useCreateTicketMutation } from "@/features/tickets/ticketsApi";
 import { errorMessage } from "@/lib/api-error";
@@ -38,6 +40,7 @@ export function NewRequestForm() {
   const router = useRouter();
   const [create, { isLoading }] = useCreateTicketMutation();
   const [formError, setFormError] = useState<string | null>(null);
+  const files = useUploads();
   const {
     register,
     handleSubmit,
@@ -48,8 +51,16 @@ export function NewRequestForm() {
 
   const onSubmit = handleSubmit(async (values) => {
     setFormError(null);
+    if (files.busy) {
+      setFormError("Wait for your files to finish uploading.");
+      return;
+    }
+    if (files.failed) {
+      setFormError("Remove the files that couldn't be uploaded, then send.");
+      return;
+    }
     try {
-      const ticket = await create(values).unwrap();
+      const ticket = await create({ ...values, attachmentIds: files.attachmentIds }).unwrap();
       router.push(`/portal/requests/${ticket.number}?created=1`);
     } catch (err) {
       setFormError(errorMessage(err as Parameters<typeof errorMessage>[0]));
@@ -116,8 +127,16 @@ export function NewRequestForm() {
             />
           </FormField>
 
+          <div className="flex flex-col gap-2">
+            <span className="text-sm font-medium">
+              Attachments <span className="font-normal text-faint">(optional)</span>
+            </span>
+            <DropZone onFiles={files.add} />
+            <UploadList uploads={files.uploads} onRemove={files.remove} />
+          </div>
+
           <div className="flex flex-wrap gap-2">
-            <Button type="submit" size="lg" disabled={isLoading}>
+            <Button type="submit" size="lg" disabled={isLoading || files.busy}>
               {isLoading && <Loader2Icon className="animate-spin" />}
               {isLoading ? "Sending…" : "Send request"}
             </Button>
@@ -132,7 +151,7 @@ export function NewRequestForm() {
           <ol className="flex flex-col gap-3">
             {[
               "You get a request number straight away.",
-              "Our team replies here, in the conversation.",
+              "Our team replies here, and we email you a copy.",
               "Reply to keep the conversation going, or mark it solved when you're done.",
             ].map((step, i) => (
               <li key={step} className="grid grid-cols-[1.375rem_minmax(0,1fr)] gap-2.5">

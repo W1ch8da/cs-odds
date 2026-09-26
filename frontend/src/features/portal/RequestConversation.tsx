@@ -19,6 +19,9 @@ import { EmptyState } from "@/components/layout/EmptyState";
 import { PersonAvatar } from "@/components/PersonAvatar";
 import { Button } from "@/components/ui/button";
 import { Skeleton } from "@/components/ui/skeleton";
+import { AttachButton, AttachmentList, UploadList } from "@/features/attachments/components";
+import type { Attachment } from "@/features/attachments/types";
+import { useUploads } from "@/features/attachments/useUploads";
 import { selectCurrentUser } from "@/features/auth/authSlice";
 import { StatusBadge } from "@/features/tickets/components/StatusBadge";
 import { CUSTOMER_STATUS_LABEL, isActive, ticketRef } from "@/features/tickets/labels";
@@ -45,7 +48,7 @@ function Banner({ ticket, fresh }: { ticket: TicketDetail; fresh: boolean }) {
   if (fresh) {
     [tone, Icon, iconTone] = ["bg-accent", SparklesIcon, "text-accent-foreground"];
     title = `We've got your request, ${ticketRef(ticket.number)}`;
-    body = "Our team will reply here. Keep this page bookmarked, or find it under My requests.";
+    body = `We've emailed a confirmation to ${ticket.requester.email}. Our team will reply here and by email.`;
   } else {
     switch (ticket.status) {
       case "pending":
@@ -55,7 +58,7 @@ function Banner({ ticket, fresh }: { ticket: TicketDetail; fresh: boolean }) {
         break;
       case "open":
         title = "With our support team";
-        body = "We'll reply here as soon as we can.";
+        body = "We'll reply here as soon as we can, and email you when we do.";
         break;
       case "on_hold":
         title = "We're working on it";
@@ -112,9 +115,9 @@ function Stamp({ iso }: { iso: string }) {
   );
 }
 
-type BubbleProps = { name: string; avatarName: string; staff: boolean; iso: string; body: string };
+type BubbleProps = { name: string; avatarName: string; staff: boolean; iso: string; body: string; attachments: Attachment[] };
 
-function Bubble({ name, avatarName, staff, iso, body }: BubbleProps) {
+function Bubble({ name, avatarName, staff, iso, body, attachments }: BubbleProps) {
   return (
     <article className="grid grid-cols-[2rem_minmax(0,1fr)] gap-3">
       <PersonAvatar name={avatarName} highlight={staff} className="size-8" />
@@ -125,6 +128,7 @@ function Bubble({ name, avatarName, staff, iso, body }: BubbleProps) {
           <Stamp iso={iso} />
         </div>
         <p className="max-w-prose break-words whitespace-pre-wrap">{body}</p>
+        <AttachmentList attachments={attachments} className="mt-3" />
       </div>
     </article>
   );
@@ -134,7 +138,14 @@ function Bubble({ name, avatarName, staff, iso, body }: BubbleProps) {
 function Thread({ ticket, meId }: { ticket: TicketDetail; meId?: string }) {
   return (
     <div className="flex flex-col gap-4">
-      <Bubble name="You" avatarName={ticket.requester.name} staff={false} iso={ticket.createdAt} body={ticket.description} />
+      <Bubble
+        name="You"
+        avatarName={ticket.requester.name}
+        staff={false}
+        iso={ticket.createdAt}
+        body={ticket.description}
+        attachments={ticket.attachments}
+      />
       {ticket.timeline.map((item) => {
         if (item.type === "comment") {
           const mine = item.author.id === meId;
@@ -146,6 +157,7 @@ function Thread({ ticket, meId }: { ticket: TicketDetail; meId?: string }) {
               staff={item.author.role !== "customer"}
               iso={item.createdAt}
               body={item.body}
+              attachments={item.attachments}
             />
           );
         }
@@ -169,17 +181,27 @@ function ReplyBox({ ticket }: { ticket: TicketDetail }) {
   const [body, setBody] = useState("");
   const [error, setError] = useState<string | null>(null);
   const [addComment, { isLoading }] = useAddCommentMutation();
+  const files = useUploads();
   const reopening = ticket.status === "solved";
 
   const send = async () => {
+    if (files.busy) {
+      setError("Wait for your files to finish uploading.");
+      return;
+    }
+    if (files.failed) {
+      setError("Remove the files that couldn't be uploaded, then send.");
+      return;
+    }
     if (!body.trim()) {
       setError("Write a reply before sending.");
       return;
     }
     setError(null);
     try {
-      await addComment({ number: ticket.number, body }).unwrap();
+      await addComment({ number: ticket.number, body, attachmentIds: files.attachmentIds }).unwrap();
       setBody("");
+      files.reset();
       toast.success(reopening ? `${ticketRef(ticket.number)} reopened. We'll get back to you soon.` : "Reply sent");
     } catch (err) {
       setError(errorMessage(err as Parameters<typeof errorMessage>[0]));
@@ -211,14 +233,16 @@ function ReplyBox({ ticket }: { ticket: TicketDetail }) {
         placeholder="Write your reply…"
         className="min-h-28 w-full resize-y rounded-lg border bg-card px-3 py-2 outline-none placeholder:text-faint focus:border-ring"
       />
+      <UploadList uploads={files.uploads} onRemove={files.remove} />
       {error && (
         <p role="alert" className="text-xs text-destructive">
           {error}
         </p>
       )}
       <div className="flex flex-wrap items-center gap-2">
+        <AttachButton onFiles={files.add} />
         <span className="text-[13px] text-faint">Your reply goes straight to the support team.</span>
-        <Button type="submit" className="ml-auto" disabled={isLoading}>
+        <Button type="submit" className="ml-auto" disabled={isLoading || files.busy}>
           {isLoading && <Loader2Icon className="animate-spin" />}
           {reopening ? "Reopen and send" : "Send reply"}
         </Button>

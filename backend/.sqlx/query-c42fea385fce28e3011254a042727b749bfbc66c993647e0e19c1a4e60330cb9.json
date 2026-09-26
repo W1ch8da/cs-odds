@@ -1,0 +1,125 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE email_outbox\n               SET status = 'sending', attempts = attempts + 1, locked_until = now() + make_interval(secs => $1)\n               WHERE id IN (\n                   SELECT id FROM email_outbox\n                   WHERE (status = 'pending' AND next_attempt_at <= now())\n                      OR (status = 'sending' AND locked_until < now())\n                   ORDER BY next_attempt_at\n                   LIMIT $2\n                   FOR UPDATE SKIP LOCKED\n               )\n               RETURNING id, to_email, to_name, subject, body_text, body_html, message_id, ticket_id, attempts",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "email_outbox",
+            "name": "id"
+          }
+        }
+      },
+      {
+        "ordinal": 1,
+        "name": "to_email",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "email_outbox",
+            "name": "to_email"
+          }
+        }
+      },
+      {
+        "ordinal": 2,
+        "name": "to_name",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "email_outbox",
+            "name": "to_name"
+          }
+        }
+      },
+      {
+        "ordinal": 3,
+        "name": "subject",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "email_outbox",
+            "name": "subject"
+          }
+        }
+      },
+      {
+        "ordinal": 4,
+        "name": "body_text",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "email_outbox",
+            "name": "body_text"
+          }
+        }
+      },
+      {
+        "ordinal": 5,
+        "name": "body_html",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "email_outbox",
+            "name": "body_html"
+          }
+        }
+      },
+      {
+        "ordinal": 6,
+        "name": "message_id",
+        "type_info": "Text",
+        "origin": {
+          "Table": {
+            "table": "email_outbox",
+            "name": "message_id"
+          }
+        }
+      },
+      {
+        "ordinal": 7,
+        "name": "ticket_id",
+        "type_info": "Uuid",
+        "origin": {
+          "Table": {
+            "table": "email_outbox",
+            "name": "ticket_id"
+          }
+        }
+      },
+      {
+        "ordinal": 8,
+        "name": "attempts",
+        "type_info": "Int4",
+        "origin": {
+          "Table": {
+            "table": "email_outbox",
+            "name": "attempts"
+          }
+        }
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Float8",
+        "Int8"
+      ]
+    },
+    "nullable": [
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      false,
+      true,
+      false
+    ]
+  },
+  "hash": "c42fea385fce28e3011254a042727b749bfbc66c993647e0e19c1a4e60330cb9"
+}

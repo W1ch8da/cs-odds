@@ -1,0 +1,17 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE attachments SET ticket_id = $2, comment_id = $3, linked_at = $4 WHERE id = ANY($1) AND ticket_id IS NULL",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "UuidArray",
+        "Uuid",
+        "Uuid",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "14db331a71c012d46b31fee4f976826a6d77c7d4375ffa3d90d275eba6868f0e"
+}

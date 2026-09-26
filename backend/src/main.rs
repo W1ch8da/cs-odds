@@ -1,4 +1,10 @@
-use cs_odds_backend::{adapters::outbound::postgres, config::Config, wiring};
+use std::time::Duration;
+
+use cs_odds_backend::{
+    adapters::{inbound::jobs, outbound::postgres},
+    config::Config,
+    wiring,
+};
 use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
@@ -14,10 +20,11 @@ async fn main() -> anyhow::Result<()> {
     let config = Config::from_env()?;
     let pool = postgres::connect(&config.database_url).await?;
     let app = wiring::build_app(pool, &config).await?;
+    jobs::spawn_email_worker(app.email_delivery.clone(), Duration::from_secs(config.mail.worker_interval_seconds));
 
     let listener = tokio::net::TcpListener::bind(config.bind_addr).await?;
     tracing::info!("listening on {}", config.bind_addr);
-    axum::serve(listener, app)
+    axum::serve(listener, app.router)
         .with_graceful_shutdown(async {
             tokio::signal::ctrl_c().await.ok();
         })

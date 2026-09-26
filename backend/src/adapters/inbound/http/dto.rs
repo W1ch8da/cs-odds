@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::{
     application::ports::inbound::{
-        AuthSession, EventKind, Page, TicketDetail, TicketSummary, TimelineItem, UserRef, ViewCounts,
+        AttachmentView, AuthSession, EventKind, UploadSlot, Page, TicketDetail, TicketSummary, TimelineItem, UserRef, ViewCounts,
     },
     domain::user::User,
 };
@@ -74,6 +74,54 @@ pub struct ListUsersQuery {
     pub role: Option<String>,
 }
 
+// ---------- Attachments ----------
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AttachmentDto {
+    pub id: Uuid,
+    pub filename: String,
+    pub content_type: String,
+    pub size: i64,
+    pub created_at: DateTime<Utc>,
+}
+
+impl From<AttachmentView> for AttachmentDto {
+    fn from(a: AttachmentView) -> Self {
+        Self { id: a.id.0, filename: a.filename, content_type: a.content_type, size: a.size, created_at: a.created_at }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct StartUploadRequest {
+    pub filename: String,
+    #[serde(default)]
+    pub content_type: String,
+    pub size: i64,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UploadSlotDto {
+    pub attachment: AttachmentDto,
+    pub upload_url: String,
+    /// Send exactly these headers with the `PUT`.
+    pub upload_headers: std::collections::BTreeMap<String, String>,
+    pub expires_at: DateTime<Utc>,
+}
+
+impl From<UploadSlot> for UploadSlotDto {
+    fn from(s: UploadSlot) -> Self {
+        Self {
+            attachment: s.attachment.into(),
+            upload_url: s.upload_url,
+            upload_headers: s.upload_headers.into_iter().collect(),
+            expires_at: s.expires_at,
+        }
+    }
+}
+
 // ---------- Tickets ----------
 
 
@@ -125,7 +173,14 @@ impl From<TicketSummary> for TicketSummaryDto {
 #[derive(Debug, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case", rename_all_fields = "camelCase")]
 pub enum TimelineItemDto {
-    Comment { id: Uuid, author: UserRefDto, body: String, internal: bool, created_at: DateTime<Utc> },
+    Comment {
+        id: Uuid,
+        author: UserRefDto,
+        body: String,
+        internal: bool,
+        attachments: Vec<AttachmentDto>,
+        created_at: DateTime<Utc>,
+    },
     Event {
         id: Uuid,
         actor: Option<UserRefDto>,
@@ -139,9 +194,14 @@ pub enum TimelineItemDto {
 impl From<TimelineItem> for TimelineItemDto {
     fn from(item: TimelineItem) -> Self {
         match item {
-            TimelineItem::Comment { id, author, body, internal, created_at } => {
-                Self::Comment { id, author: author.into(), body, internal, created_at }
-            }
+            TimelineItem::Comment { id, author, body, internal, attachments, created_at } => Self::Comment {
+                id,
+                author: author.into(),
+                body,
+                internal,
+                attachments: attachments.into_iter().map(Into::into).collect(),
+                created_at,
+            },
             TimelineItem::Event { id, actor, kind, old_value, new_value, created_at } => Self::Event {
                 id,
                 actor: actor.map(Into::into),
@@ -160,6 +220,8 @@ pub struct TicketDetailDto {
     #[serde(flatten)]
     pub summary: TicketSummaryDto,
     pub description: String,
+    /// Files attached to the description.
+    pub attachments: Vec<AttachmentDto>,
     pub resolved_at: Option<DateTime<Utc>>,
     pub timeline: Vec<TimelineItemDto>,
     pub requester_ticket_count: i64,
@@ -170,6 +232,7 @@ impl From<TicketDetail> for TicketDetailDto {
         Self {
             summary: d.summary.into(),
             description: d.description,
+            attachments: d.attachments.into_iter().map(Into::into).collect(),
             resolved_at: d.resolved_at,
             timeline: d.timeline.into_iter().map(Into::into).collect(),
             requester_ticket_count: d.requester_ticket_count,
@@ -215,6 +278,8 @@ pub struct CreateTicketRequest {
     pub requester_email: Option<String>,
     pub requester_name: Option<String>,
     pub assignee_id: Option<Uuid>,
+    #[serde(default)]
+    pub attachment_ids: Vec<Uuid>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -259,4 +324,6 @@ pub struct AddCommentRequest {
     pub internal: bool,
     /// Status to set together with the reply (staff only).
     pub status: Option<String>,
+    #[serde(default)]
+    pub attachment_ids: Vec<Uuid>,
 }

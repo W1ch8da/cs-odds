@@ -4,6 +4,7 @@ use chrono::{DateTime, Utc};
 use sqlx::{PgPool, Postgres, Transaction};
 use uuid::Uuid;
 
+use super::attachment_repository::link_attachments;
 use crate::{
     application::{
         error::{AppError, AppResult},
@@ -169,7 +170,8 @@ async fn insert_events(tx: &mut Transaction<'_, Postgres>, ticket_id: TicketId, 
 #[async_trait]
 impl TicketRepository for PgTicketRepository {
     async fn insert(&self, t: NewTicket) -> AppResult<Ticket> {
-        sqlx::query_as!(
+        let mut tx = self.pool.begin().await?;
+        let row = sqlx::query_as!(
             TicketRow,
             r#"INSERT INTO tickets (subject, description, priority, channel, requester_id, assignee_id, created_at, updated_at)
                VALUES ($1, $2, $3::text::ticket_priority, $4::text::ticket_channel, $5, $6, $7, $7)
@@ -183,9 +185,12 @@ impl TicketRepository for PgTicketRepository {
             t.assignee_id.map(|u| u.0),
             t.created_at,
         )
-        .fetch_one(&self.pool)
-        .await?
-        .try_into()
+        .fetch_one(&mut *tx)
+        .await?;
+        let ticket = Ticket::try_from(row)?;
+        link_attachments(&mut tx, &t.attachment_ids, ticket.id, None, t.created_at).await?;
+        tx.commit().await?;
+        Ok(ticket)
     }
 
     async fn find_by_number(&self, number: TicketNumber) -> AppResult<Option<Ticket>> {
@@ -195,6 +200,20 @@ impl TicketRepository for PgTicketRepository {
                       channel::text AS "channel!", requester_id, assignee_id, created_at, updated_at, resolved_at
                FROM tickets WHERE number = $1"#,
             number.0,
+        )
+        .fetch_optional(&self.pool)
+        .await?
+        .map(Ticket::try_from)
+        .transpose()
+    }
+
+    async fn find_by_id(&self, id: TicketId) -> AppResult<Option<Ticket>> {
+        sqlx::query_as!(
+            TicketRow,
+            r#"SELECT id, number, subject, description, status::text AS "status!", priority::text AS "priority!",
+                      channel::text AS "channel!", requester_id, assignee_id, created_at, updated_at, resolved_at
+               FROM tickets WHERE id = $1"#,
+            id.0,
         )
         .fetch_optional(&self.pool)
         .await?
@@ -213,16 +232,18 @@ impl TicketRepository for PgTicketRepository {
     async fn add_comment(&self, ticket: &Ticket, c: NewComment, events: &[NewEvent]) -> AppResult<()> {
         let mut tx = self.pool.begin().await?;
         save_ticket(&mut tx, ticket).await?;
-        sqlx::query!(
-            "INSERT INTO ticket_comments (ticket_id, author_id, body, is_internal, created_at) VALUES ($1, $2, $3, $4, $5)",
+        let comment_id = sqlx::query_scalar!(
+            "INSERT INTO ticket_comments (ticket_id, author_id, body, is_internal, created_at)
+             VALUES ($1, $2, $3, $4, $5) RETURNING id",
             ticket.id.0,
             c.author_id.0,
             c.body.as_str(),
             c.internal,
             c.created_at,
         )
-        .execute(&mut *tx)
+        .fetch_one(&mut *tx)
         .await?;
+        link_attachments(&mut tx, &c.attachment_ids, ticket.id, Some(comment_id), c.created_at).await?;
         insert_events(&mut tx, ticket.id, events).await?;
         tx.commit().await?;
         Ok(())
@@ -363,6 +384,8 @@ impl TicketRepository for PgTicketRepository {
                         author: user.ok_or_else(|| anyhow!("comment without author"))?,
                         body: r.body.unwrap_or_default(),
                         internal: r.internal.unwrap_or(false),
+                        // Filled in by the service from the attachment repository.
+                        attachments: Vec::new(),
                         created_at: r.created_at,
                     })
                 } else {

@@ -16,18 +16,22 @@ services:
       timeout: 3s
       retries: 10
 
-  # S3-compatible storage for attachments (milestone 4). Console: http://localhost:9001
-  minio:
-    image: docker.io/minio/minio:latest
-    command: server /data --console-address ":9001"
+  # S3-compatible storage for attachments (RustFS, an open-source MinIO
+  # replacement; MinIO no longer publishes community images).
+  # S3 API: http://localhost:9000 · Console: http://localhost:9001
+  s3:
+    image: docker.io/rustfs/rustfs:latest
     environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
+      RUSTFS_ACCESS_KEY: csodds
+      RUSTFS_SECRET_KEY: csodds-dev-secret
+      RUSTFS_CONSOLE_ENABLE: "true"
+      # Browsers upload straight to storage with presigned URLs.
+      RUSTFS_CORS_ALLOWED_ORIGINS: "http://localhost:3000"
     ports:
       - "9000:9000"
       - "9001:9001"
     volumes:
-      - miniodata:/data
+      - s3data:/data
 
   # Catches outgoing email (milestone 5). Web UI: http://localhost:8025
   mailpit:
@@ -38,4 +42,4 @@ services:
 
 volumes:
   pgdata:
-  miniodata:
+  s3data:

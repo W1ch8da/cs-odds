@@ -4,7 +4,7 @@ Target layout for the full MVP (milestones 1–8). Items marked ✅ exist today.
 
 ```
 CS-ODDS/
-├── compose.yml                  ✅ Postgres 18, MinIO (S3), Mailpit (SMTP)
+├── compose.yml                  ✅ Postgres 18, RustFS (S3-compatible), Mailpit (SMTP)
 ├── README.md                    ✅
 ├── docs/ARCHITECTURE.md         ✅ this file
 ├── backend/                     Rust · Axum · sqlx · Ports & Adapters
@@ -24,8 +24,8 @@ backend/
 ├── .sqlx/                       offline query metadata (cargo sqlx prepare), committed
 ├── migrations/
 │   ├── 20260926000001_init.sql  ✅ users, refresh_tokens, sla_policies, tickets, comments, events
-│   ├── …_attachments.sql        M4
-│   └── …_email_outbox.sql       M5
+│   ├── …_attachments.sql  ✅
+│   └── …_email_outbox.sql  ✅
 ├── src/
 │   ├── main.rs                  ✅ entry: config → wiring → serve
 │   ├── lib.rs                   ✅
@@ -38,7 +38,7 @@ backend/
 │   │   ├── ticket.rs            Ticket, TicketNumber, Status (+ allowed transitions),
 │   │   │                        Priority, Channel  ✅
 │   │   ├── comment.rs           Comment, Visibility (public / internal)  ✅
-│   │   ├── attachment.rs        Attachment, size/type limits                   M4
+│   │   ├── attachment.rs        Attachment, size/type limits  ✅
 │   │   ├── sla.rs               SlaPolicy, due-date calculation, breach rules  M7
 │   │   └── ticket_event.rs      audit events  ✅
 │   │
@@ -52,7 +52,7 @@ backend/
 │   │   │   │   ├── users.rs             create staff, list users/agents  ✅
 │   │   │   │   ├── tickets.rs           create, list/filter, get, update, assign  ✅
 │   │   │   │   ├── comments.rs          reply, internal note, timeline  ✅
-│   │   │   │   ├── attachments.rs       presign upload/download, confirm                M4
+│   │   │   │   ├── attachments.rs       ✅ upload slots (draft → link on send), permission-checked downloads
 │   │   │   │   ├── inbound_email.rs     ingest parsed email → ticket/comment            M6
 │   │   │   │   ├── sla.rs               policies CRUD, breach sweep                     M7
 │   │   │   │   └── dashboard.rs         summary metrics                                 M8
@@ -62,8 +62,8 @@ backend/
 │   │   │       ├── password_hasher.rs, access_token_codec.rs,
 │   │   │       │   token_generator.rs, clock.rs  ✅
 │   │   │       ├── ticket_repository.rs, comment_repository.rs, event_repository.rs  ✅
-│   │   │       ├── file_storage.rs, attachment_repository.rs                           M4
-│   │   │       ├── mail_outbox.rs, mail_sender.rs                                      M5
+│   │   │       ├── file_storage.rs, attachment_repository.rs  ✅
+│   │   │       ├── email.rs  ✅ EmailOutbox (queue), MailSender (SMTP)
 │   │   │       ├── sla_policy_repository.rs                                            M7
 │   │   │       └── dashboard_query.rs   (read model)                                   M8
 │   │   └── services/            use-case implementations (one per inbound port)
@@ -82,14 +82,14 @@ backend/
 │       │   │   └── handlers/       health ✅, auth, users, tickets, comments,
 │       │   │                       attachments, sla, dashboard, webhooks
 │       │   └── jobs/            timer-driven adapters
-│       │       ├── outbox_worker.rs     sends queued emails                    M5
+│       │       ├── (jobs.rs) email worker: sends queued emails every few seconds  ✅
 │       │       └── sla_worker.rs        marks breaches every minute            M7
 │       └── outbound/            DRIVEN adapters (things the app calls)
 │           ├── postgres/        ✅ sqlx: repositories, DB enum types, error mapping
 │           ├── security/        argon2 hasher, JWT codec, random tokens  ✅
 │           ├── system/          clock  ✅
-│           ├── s3/              file storage + presigned URLs                  M4
-│           └── smtp/            lettre mail sender                             M5
+│           ├── s3.rs            ✅ S3 file storage, presigned URLs (RustFS locally, S3/R2 in prod)
+│           └── smtp.rs          ✅ lettre mail sender
 └── tests/                       full-stack tests (real Postgres via #[sqlx::test])
     ├── auth_flow.rs  tickets_flow.rs  inbound_email.rs
 ```
@@ -137,7 +137,7 @@ frontend/src/
 │   │                            TicketFilters, TicketForm, StatusBadge, PriorityBadge,
 │   │                            AssigneeSelect  ✅
 │   ├── portal/                  ✅ PortalHome, NewRequestForm, RequestConversation (customer side)
-│   ├── attachments/             attachmentsApi, FileDropzone, AttachmentList      M4
+│   ├── attachments/             ✅ attachmentsApi, useUploads (progress), DropZone, UploadList, AttachmentList
 │   ├── sla/                     slaApi, SlaIndicator ("due in 2h"), SlaPolicyForm M7
 │   └── dashboard/               dashboardApi, KpiTiles, charts                    M8
 │

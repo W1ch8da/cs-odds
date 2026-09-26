@@ -37,6 +37,8 @@ pub fn router(state: HttpState, frontend_origin: HeaderValue) -> Router {
         .route("/tickets/counts", get(handlers::tickets::counts))
         .route("/tickets/{number}", get(handlers::tickets::get).patch(handlers::tickets::update))
         .route("/tickets/{number}/comments", post(handlers::tickets::add_comment))
+        .route("/attachments", post(handlers::attachments::start_upload))
+        .route("/attachments/{id}/download", get(handlers::attachments::download))
         .layer(TraceLayer::new_for_http())
         .layer(cors)
         .with_state(state)
@@ -61,7 +63,7 @@ mod tests {
         application::{
             error::{AppError, AppResult},
             ports::inbound::{CheckHealth, HealthReport, UserAdminUseCases},
-            services::{AuthService, TicketService, UserAdminService, test_support::*},
+            services::{AttachmentService, AuthService, UserAdminService, test_support::*},
         },
     };
 
@@ -95,9 +97,11 @@ mod tests {
             Duration::days(30),
         );
         let users = Arc::new(UserAdminService::new(env.users.clone(), Arc::new(FakeHasher)));
-        let tickets = Arc::new(TicketService::new(
-            Arc::new(InMemoryTickets::new(env.users.clone())),
-            env.users.clone(),
+        let tickets = Arc::new(env.ticket_service());
+        let attachments = Arc::new(AttachmentService::new(
+            env.attachments.clone(),
+            env.tickets.clone(),
+            env.storage.clone(),
             env.clock.clone(),
         ));
         let state = HttpState {
@@ -105,6 +109,7 @@ mod tests {
             auth: Arc::new(auth),
             users: users.clone(),
             tickets,
+            attachments,
             cookies: CookieSettings { secure: false },
         };
         TestApp { app: router(state, HeaderValue::from_static("http://localhost:3000")), users }

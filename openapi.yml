@@ -34,6 +34,12 @@ info:
     Every error has the same body: `{ "error": { "code": "...", "message": "..." } }`.
     `message` is written for end users and can be shown as-is.
 
+    ## Email notifications
+    Ticket actions queue emails (confirmations, replies, solved, assignment,
+    internal-note alerts to the assignee). A background worker sends them, so
+    no endpoint ever waits for, or fails because of, the mail server. Internal
+    notes are never emailed to customers.
+
     ## Conventions
     JSON fields are camelCase. Timestamps are RFC 3339 in UTC. Ticket numbers
     in paths accept `1042` or `TKT-1042`.
@@ -53,6 +59,16 @@ tags:
     description: Team management.
   - name: Tickets
     description: Requests, conversations and the agent queue.
+  - name: Attachments
+    description: |
+      Files go straight to object storage, never through the API:
+      1. `POST /attachments` reserves a draft and returns a presigned `uploadUrl`.
+      2. The client `PUT`s the bytes to `uploadUrl` with exactly the `uploadHeaders`.
+      3. The client lists the draft in `attachmentIds` when creating a ticket or comment.
+         The API checks the file really arrived at the declared size, then links it.
+
+      Limits: 25 MB per file, 10 files per message. A draft can be used once, and only by
+      its uploader.
 security:
   - cookieAuth: []
   - bearerAuth: []
@@ -446,6 +462,59 @@ paths:
         "409": { $ref: "#/components/responses/TicketClosed" }
         "422": { $ref: "#/components/responses/Validation" }
 
+  /attachments:
+    post:
+      tags: [Attachments]
+      operationId: startUpload
+      summary: Reserve an upload slot
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/StartUploadRequest" }
+            example: { filename: crash screen.png, contentType: image/png, size: 48213 }
+      responses:
+        "201":
+          description: Draft created. Upload within 15 minutes.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/UploadSlot" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422":
+          description: Empty or unusable filename, empty file, or larger than 25 MB.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /attachments/{id}/download:
+    get:
+      tags: [Attachments]
+      operationId: downloadAttachment
+      summary: Download a file
+      description: |
+        Checks access, then redirects to a download link that is valid for 5 minutes. The file is
+        served with `Content-Disposition: attachment` and its original name.
+        Customers can download files on their own tickets, except files on internal notes.
+        Staff can download any linked file. Drafts are only visible to their uploader.
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema: { type: string, format: uuid }
+      responses:
+        "303":
+          description: Redirect to the file in storage.
+          headers:
+            Location:
+              description: Presigned download URL.
+              schema: { type: string, format: uri }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404":
+          description: No such file, or the caller may not see it.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
 components:
   securitySchemes:
     cookieAuth:
@@ -518,6 +587,46 @@ components:
           schema: { $ref: "#/components/schemas/Error" }
 
   schemas:
+    Attachment:
+      type: object
+      required: [id, filename, contentType, size, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        filename: { type: string, description: "Original name, cleaned of paths and control characters." }
+        contentType: { type: string, example: image/png }
+        size: { type: integer, format: int64, description: Bytes. }
+        createdAt: { type: string, format: date-time }
+
+    StartUploadRequest:
+      type: object
+      required: [filename, size]
+      properties:
+        filename: { type: string, minLength: 1 }
+        contentType:
+          type: string
+          description: Unknown or malformed types are stored as `application/octet-stream`.
+        size: { type: integer, format: int64, minimum: 1, maximum: 26214400 }
+
+    UploadSlot:
+      type: object
+      required: [attachment, uploadUrl, uploadHeaders, expiresAt]
+      properties:
+        attachment: { $ref: "#/components/schemas/Attachment" }
+        uploadUrl: { type: string, format: uri, description: Presigned URL for one `PUT` of the file bytes. }
+        uploadHeaders:
+          type: object
+          additionalProperties: { type: string }
+          description: Send exactly these headers with the `PUT`; they are part of the signature.
+          example: { content-type: image/png }
+        expiresAt: { type: string, format: date-time }
+
+    AttachmentIds:
+      type: array
+      maxItems: 10
+      uniqueItems: true
+      description: Uploaded drafts (from `POST /attachments`) to attach. Each can be used once.
+      items: { type: string, format: uuid }
+
     Error:
       type: object
       required: [error]
@@ -639,13 +748,16 @@ components:
 
     TimelineComment:
       type: object
-      required: [type, id, author, body, internal, createdAt]
+      required: [type, id, author, body, internal, attachments, createdAt]
       properties:
         type: { type: string, const: comment }
         id: { type: string, format: uuid }
         author: { $ref: "#/components/schemas/UserRef" }
         body: { type: string }
         internal: { type: boolean, description: Internal notes are only returned to staff. }
+        attachments:
+          type: array
+          items: { $ref: "#/components/schemas/Attachment" }
         createdAt: { type: string, format: date-time }
 
     TimelineEvent:
@@ -683,9 +795,13 @@ components:
       allOf:
         - { $ref: "#/components/schemas/TicketSummary" }
         - type: object
-          required: [description, resolvedAt, timeline, requesterTicketCount]
+          required: [description, attachments, resolvedAt, timeline, requesterTicketCount]
           properties:
             description: { type: string, description: The requester's first message. }
+            attachments:
+              type: array
+              description: Files attached to the description.
+              items: { $ref: "#/components/schemas/Attachment" }
             resolvedAt:
               type: [string, "null"]
               format: date-time
@@ -729,6 +845,7 @@ components:
         requesterEmail: { type: string, format: email, description: Staff only. The customer the ticket is for. }
         requesterName: { type: string, maxLength: 100, description: Staff only. Required when the customer is new. }
         assigneeId: { type: string, format: uuid, description: Staff only. Must be an agent or admin. }
+        attachmentIds: { $ref: "#/components/schemas/AttachmentIds" }
 
     UpdateTicketRequest:
       type: object
@@ -750,3 +867,4 @@ components:
         status:
           allOf: [{ $ref: "#/components/schemas/TicketStatus" }]
           description: Staff only. Status to set together with the reply.
+        attachmentIds: { $ref: "#/components/schemas/AttachmentIds" }

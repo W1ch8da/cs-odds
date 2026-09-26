@@ -5,6 +5,8 @@ import { useEffect, useRef, useState } from "react";
 import { toast } from "sonner";
 
 import { Button } from "@/components/ui/button";
+import { AttachButton, UploadList } from "@/features/attachments/components";
+import { useUploads } from "@/features/attachments/useUploads";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
 import { errorMessage } from "@/lib/api-error";
 import { firstName } from "@/lib/format";
@@ -29,6 +31,7 @@ export function AgentComposer({ ticket }: { ticket: TicketDetail }) {
   const [after, setAfter] = useState<After>("pending");
   const [error, setError] = useState<string | null>(null);
   const [addComment, { isLoading }] = useAddCommentMutation();
+  const files = useUploads();
   const textRef = useRef<HTMLTextAreaElement>(null);
   const customer = firstName(ticket.requester.name);
   const note = mode === "note";
@@ -48,6 +51,14 @@ export function AgentComposer({ ticket }: { ticket: TicketDetail }) {
   }, []);
 
   const send = async () => {
+    if (files.busy) {
+      setError("Wait for your files to finish uploading.");
+      return;
+    }
+    if (files.failed) {
+      setError("Remove the files that couldn't be uploaded, then send.");
+      return;
+    }
     if (!body.trim()) {
       setError(note ? "Write the note first." : "Write your reply first.");
       textRef.current?.focus();
@@ -60,8 +71,10 @@ export function AgentComposer({ ticket }: { ticket: TicketDetail }) {
         body,
         internal: note,
         status: !note && after !== "keep" ? after : undefined,
+        attachmentIds: files.attachmentIds,
       }).unwrap();
       setBody("");
+      files.reset();
       toast.success(note ? "Note added. Only your team can see it." : `Reply sent to ${ticket.requester.name}`);
     } catch (err) {
       setError(errorMessage(err as Parameters<typeof errorMessage>[0]));
@@ -123,15 +136,17 @@ export function AgentComposer({ ticket }: { ticket: TicketDetail }) {
         }}
         aria-label={note ? "Internal note" : `Reply to ${customer}`}
         aria-invalid={error ? true : undefined}
-        placeholder={note ? "Only your team can see this note" : `Write a reply. ${customer} will see it in the portal.`}
+        placeholder={note ? "Only your team can see this note" : `Write a reply. ${customer} will see it in the portal and by email.`}
         className="min-h-24 w-full resize-y rounded-lg border bg-card px-3 py-2 text-sm outline-none placeholder:text-faint focus:border-ring"
       />
+      <UploadList uploads={files.uploads} onRemove={files.remove} />
       {error && (
         <p role="alert" className="text-xs text-destructive">
           {error}
         </p>
       )}
       <div className="flex flex-wrap items-center gap-2">
+        <AttachButton onFiles={files.add} />
         <span className="text-xs text-faint">
           <kbd className="rounded border px-1 font-mono">⌘</kbd> <kbd className="rounded border px-1 font-mono">Enter</kbd> to send
         </span>
@@ -155,7 +170,7 @@ export function AgentComposer({ ticket }: { ticket: TicketDetail }) {
               </Select>
             </>
           )}
-          <Button type="submit" size="sm" disabled={isLoading}>
+          <Button type="submit" size="sm" disabled={isLoading || files.busy}>
             {isLoading && <Loader2Icon className="animate-spin" />}
             {note ? "Add note" : "Send reply"}
           </Button>

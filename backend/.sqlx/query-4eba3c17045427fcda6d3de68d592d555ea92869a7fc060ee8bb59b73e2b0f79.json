@@ -1,0 +1,16 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE email_outbox\n               SET status = CASE WHEN $3::float8 IS NULL THEN 'failed'::email_status ELSE 'pending'::email_status END,\n                   next_attempt_at = COALESCE(now() + make_interval(secs => $3), next_attempt_at),\n                   last_error = $2,\n                   locked_until = NULL\n               WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Float8"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "4eba3c17045427fcda6d3de68d592d555ea92869a7fc060ee8bb59b73e2b0f79"
+}

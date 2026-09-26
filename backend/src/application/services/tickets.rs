@@ -11,9 +11,16 @@ use crate::{
                 AddCommentInput, AssigneeFilter, CreateTicketInput, EventKind, ListTicketsInput, Page, TicketDetail,
                 TicketSummary, TicketUseCases, TimelineItem, UpdateTicketInput, ViewCounts,
             },
-            outbound::{Clock, NewComment, NewEvent, NewTicket, TicketQuery, TicketRepository, UserRepository},
+            outbound::{
+                AttachmentRepository, Clock, FileStorage, NewComment, NewEvent, NewTicket, TicketQuery,
+                TicketRepository, UserRepository,
+            },
         },
         principal::Principal,
+        services::{
+            attachments::verify_drafts,
+            notifications::{Notifier, TicketActivity},
+        },
     },
     domain::{
         ticket::{Channel, MessageBody, Priority, Status, Subject, Ticket, TicketChange, TicketNumber},
@@ -27,12 +34,31 @@ const MAX_PAGE_SIZE: u32 = 100;
 pub struct TicketService {
     tickets: Arc<dyn TicketRepository>,
     users: Arc<dyn UserRepository>,
+    attachments: Arc<dyn AttachmentRepository>,
+    storage: Arc<dyn FileStorage>,
+    notifier: Arc<Notifier>,
     clock: Arc<dyn Clock>,
 }
 
 impl TicketService {
-    pub fn new(tickets: Arc<dyn TicketRepository>, users: Arc<dyn UserRepository>, clock: Arc<dyn Clock>) -> Self {
-        Self { tickets, users, clock }
+    pub fn new(
+        tickets: Arc<dyn TicketRepository>,
+        users: Arc<dyn UserRepository>,
+        attachments: Arc<dyn AttachmentRepository>,
+        storage: Arc<dyn FileStorage>,
+        notifier: Arc<Notifier>,
+        clock: Arc<dyn Clock>,
+    ) -> Self {
+        Self { tickets, users, attachments, storage, notifier, clock }
+    }
+
+    /// Queues notification emails for a change that was just saved.
+    async fn notify(&self, actor: &Principal, ticket: &TicketDetail, activity: TicketActivity<'_>) {
+        let name = match self.users.find_by_id(actor.user_id).await {
+            Ok(Some(user)) => user.name.as_str().to_owned(),
+            _ => "Our support team".to_owned(),
+        };
+        self.notifier.notify(actor, &name, ticket, activity).await;
     }
 
     /// Loads a ticket the actor may see. Customers get `NotFound` for other
@@ -55,9 +81,26 @@ impl TicketService {
                 TimelineItem::Event { kind, .. } => *kind == EventKind::StatusChanged,
             });
         }
+        // Put each file under the message it was sent with. Files on hidden
+        // comments are dropped together with the comment.
+        let mut description_files = Vec::new();
+        let mut by_comment: std::collections::HashMap<uuid::Uuid, Vec<_>> = std::collections::HashMap::new();
+        for file in self.attachments.for_ticket(ticket.id).await? {
+            match file.comment_id {
+                None => description_files.push(file.view),
+                Some(comment_id) => by_comment.entry(comment_id).or_default().push(file.view),
+            }
+        }
+        for item in &mut timeline {
+            if let TimelineItem::Comment { id, attachments, .. } = item {
+                *attachments = by_comment.remove(id).unwrap_or_default();
+            }
+        }
+
         Ok(TicketDetail {
             summary: self.tickets.summary(ticket.id).await?,
             description: ticket.description.as_str().to_owned(),
+            attachments: description_files,
             resolved_at: ticket.resolved_at,
             timeline,
             requester_ticket_count: self.tickets.count_for_requester(ticket.requester_id).await?,
@@ -134,11 +177,23 @@ impl TicketUseCases for TicketService {
             (actor.user_id, Channel::Portal, None)
         };
 
+        let attachment_ids = verify_drafts(actor, &input.attachment_ids, &*self.attachments, &*self.storage).await?;
         let ticket = self
             .tickets
-            .insert(NewTicket { subject, description, priority, channel, requester_id, assignee_id, created_at: self.clock.now() })
+            .insert(NewTicket {
+                subject,
+                description,
+                priority,
+                channel,
+                requester_id,
+                assignee_id,
+                created_at: self.clock.now(),
+                attachment_ids,
+            })
             .await?;
-        self.detail(actor, &ticket).await
+        let detail = self.detail(actor, &ticket).await?;
+        self.notify(actor, &detail, TicketActivity::Created).await;
+        Ok(detail)
     }
 
     async fn list(&self, actor: &Principal, input: ListTicketsInput) -> AppResult<Page<TicketSummary>> {
@@ -208,17 +263,21 @@ impl TicketUseCases for TicketService {
             changes.extend(ticket.assign(assignee, now)?);
         }
 
-        if !changes.is_empty() {
-            let events: Vec<_> = changes.into_iter().map(|c| event(actor, c, now)).collect();
-            self.tickets.update(&ticket, &events).await?;
+        if changes.is_empty() {
+            return self.detail(actor, &ticket).await;
         }
-        self.detail(actor, &ticket).await
+        let events: Vec<_> = changes.iter().cloned().map(|c| event(actor, c, now)).collect();
+        self.tickets.update(&ticket, &events).await?;
+        let detail = self.detail(actor, &ticket).await?;
+        self.notify(actor, &detail, TicketActivity::Updated { changes: &changes }).await;
+        Ok(detail)
     }
 
     async fn add_comment(&self, actor: &Principal, number: TicketNumber, input: AddCommentInput) -> AppResult<TicketDetail> {
         let mut ticket = self.load(actor, number).await?;
         ticket.ensure_not_closed()?;
         let body = MessageBody::parse(&input.body)?;
+        let attachment_ids = verify_drafts(actor, &input.attachment_ids, &*self.attachments, &*self.storage).await?;
         let now = self.clock.now();
         let mut changes = Vec::new();
 
@@ -238,10 +297,14 @@ impl TicketUseCases for TicketService {
         }
         ticket.touch(now);
 
-        let comment = NewComment { author_id: actor.user_id, body, internal: input.internal, created_at: now };
-        let events: Vec<_> = changes.into_iter().map(|c| event(actor, c, now)).collect();
+        let body_text = body.as_str().to_owned();
+        let comment = NewComment { author_id: actor.user_id, body, internal: input.internal, created_at: now, attachment_ids };
+        let events: Vec<_> = changes.iter().cloned().map(|c| event(actor, c, now)).collect();
         self.tickets.add_comment(&ticket, comment, &events).await?;
-        self.detail(actor, &ticket).await
+        let detail = self.detail(actor, &ticket).await?;
+        let activity = TicketActivity::Commented { body: &body_text, internal: input.internal, changes: &changes };
+        self.notify(actor, &detail, activity).await;
+        Ok(detail)
     }
 
     async fn view_counts(&self, actor: &Principal) -> AppResult<ViewCounts> {
@@ -263,8 +326,8 @@ mod tests {
 
     fn env() -> Env {
         let base = TestEnv::default();
-        let tickets = Arc::new(InMemoryTickets::new(base.users.clone()));
-        let svc = TicketService::new(tickets.clone(), base.users.clone(), base.clock.clone());
+        let tickets = base.tickets.clone();
+        let svc = base.ticket_service();
         Env { base, tickets, svc }
     }
 
@@ -492,6 +555,35 @@ mod tests {
 
         let bad_assignee = UpdateTicketInput { assignee_id: Some(Some(customer.user_id)), ..Default::default() };
         assert!(matches!(e.svc.update(&agent, n, bad_assignee).await, Err(AppError::Validation(_))));
+    }
+
+    #[tokio::test]
+    async fn changes_queue_the_right_emails() {
+        let e = env();
+        let customer = e.base.seed(Role::Customer).await;
+        let agent = e.base.seed(Role::Agent).await;
+        let customer_email = e.base.users.find_by_id(customer.user_id).await.unwrap().unwrap().email.as_str().to_owned();
+        let agent_email = e.base.users.find_by_id(agent.user_id).await.unwrap().unwrap().email.as_str().to_owned();
+
+        let n = e.svc.create(&customer, portal_ticket()).await.unwrap().summary.number;
+        let subject = format!("[#{n}] Password reset link expired");
+        assert_eq!(e.base.outbox.take(), [(customer_email.clone(), subject.clone())]);
+
+        // A note on an unassigned ticket emails nobody.
+        e.svc.add_comment(&agent, n, AddCommentInput { internal: true, ..reply("Looking into it") }).await.unwrap();
+        assert!(e.base.outbox.take().is_empty());
+
+        // The reply reaches the customer (and assigns the agent, silently).
+        e.svc.add_comment(&agent, n, AddCommentInput { status_after: Some(Status::Pending), ..reply("Try this") }).await.unwrap();
+        assert_eq!(e.base.outbox.take(), [(customer_email.clone(), format!("Re: {subject}"))]);
+
+        // The customer's answer reaches the assignee.
+        e.svc.add_comment(&customer, n, reply("Worked!")).await.unwrap();
+        assert_eq!(e.base.outbox.take(), [(agent_email, format!("Re: {subject}"))]);
+
+        // No-op updates send nothing.
+        e.svc.update(&agent, n, UpdateTicketInput { status: Some(Status::Open), ..Default::default() }).await.unwrap();
+        assert!(e.base.outbox.take().is_empty());
     }
 
     #[tokio::test]

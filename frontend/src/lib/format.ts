@@ -33,3 +33,10 @@ export function timeAgo(iso: string, now: number = Date.now()): string {
 export function firstName(name: string): string {
   return name.split(/\s+/)[0] ?? name;
 }
+
+/** "2.4 MB", "184 KB", "12 B". */
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${Math.round(bytes / 1024)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}

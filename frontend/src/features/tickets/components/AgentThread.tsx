@@ -1,6 +1,8 @@
 import { LockIcon } from "lucide-react";
 
 import { PersonAvatar } from "@/components/PersonAvatar";
+import { AttachmentList } from "@/features/attachments/components";
+import type { Attachment } from "@/features/attachments/types";
 import { formatDateTime, timeAgo } from "@/lib/format";
 import { cn } from "@/lib/utils";
 
@@ -45,10 +47,11 @@ type MessageProps = {
   meta: string;
   createdAt: string;
   body: string;
+  attachments: Attachment[];
   internal?: boolean;
 };
 
-function Message({ name, avatarName, highlight, meta, createdAt, body, internal = false }: MessageProps) {
+function Message({ name, avatarName, highlight, meta, createdAt, body, attachments, internal = false }: MessageProps) {
   return (
     <article className="grid max-w-3xl grid-cols-[2rem_minmax(0,1fr)] gap-3">
       <PersonAvatar name={avatarName ?? name} highlight={highlight} className="size-8" />
@@ -65,6 +68,7 @@ function Message({ name, avatarName, highlight, meta, createdAt, body, internal 
           <Stamp iso={createdAt} />
         </div>
         <p className="max-w-prose text-sm leading-relaxed break-words whitespace-pre-wrap">{body}</p>
+        <AttachmentList attachments={attachments} className="mt-3" />
       </div>
     </article>
   );
@@ -80,6 +84,7 @@ export function AgentThread({ ticket, meId }: { ticket: TicketDetail; meId?: str
         meta={`via ${CHANNEL_LABEL[ticket.channel].toLowerCase()}`}
         createdAt={ticket.createdAt}
         body={ticket.description}
+        attachments={ticket.attachments}
       />
       {ticket.timeline.map((item) =>
         item.type === "comment" ? (
@@ -91,6 +96,7 @@ export function AgentThread({ ticket, meId }: { ticket: TicketDetail; meId?: str
             meta={item.internal ? "" : item.author.role === "customer" ? "replied" : "replied to the customer"}
             createdAt={item.createdAt}
             body={item.body}
+            attachments={item.attachments}
             internal={item.internal}
           />
         ) : (
