@@ -135,6 +135,15 @@ SQLX_OFFLINE=true cargo build     # builds without a database using .sqlx/
 cd frontend && yarn lint && yarn build
 ```
 
+## API reference
+
+The REST API is documented in [`openapi.yml`](openapi.yml) (OpenAPI 3.1). It covers every endpoint, request and response body, role rule and error code. To browse it locally:
+
+```sh
+yarn dlx -p @redocly/cli redocly build-docs openapi.yml -o api-docs.html   # then open api-docs.html
+# or paste openapi.yml into https://editor.swagger.io
+```
+
 ## Backend layout (Ports & Adapters)
 
 - `src/domain`: entities and business rules, with no I/O.

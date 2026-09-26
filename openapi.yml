@@ -1,0 +1,752 @@
+openapi: 3.1.0
+info:
+  title: CS-ODDS Support API
+  version: 0.1.0
+  summary: Customer-support ticket system (phase 1).
+  description: |
+    REST API for the CS-ODDS customer-support ticket system.
+
+    ## Authentication
+    Signing in (`/auth/login` or `/auth/register`) sets two **httpOnly cookies**:
+
+    | Cookie | Contents | Lifetime |
+    |---|---|---|
+    | `cs_access` | JWT access token (HS256) | 15 minutes |
+    | `cs_refresh` | Opaque refresh token, single use | 30 days |
+
+    Browsers send them automatically. API clients can instead send the access
+    token as `Authorization: Bearer <token>`.
+
+    When a request returns `401`, call `POST /auth/refresh` once and retry.
+    Each refresh token works once. Presenting an already-used refresh token
+    signs that user out on every device.
+
+    ## Roles
+    - **customer**: sees and acts on their own tickets only. Never sees
+      internal notes or assignment and priority history.
+    - **agent**: works every ticket.
+    - **admin**: everything an agent can do, plus managing the team.
+
+    Other customers' tickets return `404`, not `403`, so ticket numbers
+    reveal nothing.
+
+    ## Errors
+    Every error has the same body: `{ "error": { "code": "...", "message": "..." } }`.
+    `message` is written for end users and can be shown as-is.
+
+    ## Conventions
+    JSON fields are camelCase. Timestamps are RFC 3339 in UTC. Ticket numbers
+    in paths accept `1042` or `TKT-1042`.
+  contact:
+    url: https://github.com/W1ch8da/cs-odds
+servers:
+  - url: http://localhost:8080
+    description: Rust API, direct
+  - url: http://localhost:3000/api
+    description: Through the Next.js app (same-origin proxy used by the browser)
+tags:
+  - name: System
+    description: Health checks.
+  - name: Auth
+    description: Sign-up, sign-in and sessions.
+  - name: Users
+    description: Team management.
+  - name: Tickets
+    description: Requests, conversations and the agent queue.
+security:
+  - cookieAuth: []
+  - bearerAuth: []
+
+paths:
+  /health:
+    get:
+      tags: [System]
+      operationId: getHealth
+      summary: Check the API and database
+      security: []
+      responses:
+        "200":
+          description: The API is up and the database is reachable.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/HealthReport" }
+        "500": { $ref: "#/components/responses/Internal" }
+
+  /auth/register:
+    post:
+      tags: [Auth]
+      operationId: register
+      summary: Create a customer account and sign in
+      description: Self-service sign-up always creates a **customer**. Team members are added by an admin via `POST /users`.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/RegisterRequest" }
+            example: { email: jordan@northwind.example, name: Jordan Blake, password: correct horse battery }
+      responses:
+        "201":
+          description: Account created and signed in.
+          headers:
+            Set-Cookie: { $ref: "#/components/headers/SessionCookies" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+        "409":
+          description: An account with this email already exists.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422": { $ref: "#/components/responses/Validation" }
+
+  /auth/login:
+    post:
+      tags: [Auth]
+      operationId: login
+      summary: Sign in
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/LoginRequest" }
+            example: { email: jordan@northwind.example, password: correct horse battery }
+      responses:
+        "200":
+          description: Signed in.
+          headers:
+            Set-Cookie: { $ref: "#/components/headers/SessionCookies" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+        "401":
+          description: >
+            `invalid_credentials`. The same response is returned for an unknown email,
+            a wrong password, or an account without a password, so it doesn't
+            reveal which accounts exist.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+              example: { error: { code: invalid_credentials, message: "That email and password don't match. Check them and try again." } }
+        "422": { $ref: "#/components/responses/Validation" }
+
+  /auth/refresh:
+    post:
+      tags: [Auth]
+      operationId: refresh
+      summary: Exchange the refresh cookie for a new session
+      description: |
+        Reads the `cs_refresh` cookie, revokes it and issues new cookies.
+        On failure both cookies are cleared. If the token had already been used,
+        every session of that user is revoked.
+      security:
+        - refreshCookie: []
+      responses:
+        "200":
+          description: New session issued.
+          headers:
+            Set-Cookie: { $ref: "#/components/headers/SessionCookies" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Session" }
+        "401":
+          description: Missing, expired, revoked or reused refresh token. Cookies are cleared.
+          headers:
+            Set-Cookie: { $ref: "#/components/headers/ClearedCookies" }
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /auth/logout:
+    post:
+      tags: [Auth]
+      operationId: logout
+      summary: Sign out
+      description: Revokes the refresh token, if any, and clears both cookies. Always succeeds.
+      security: []
+      responses:
+        "204":
+          description: Signed out.
+          headers:
+            Set-Cookie: { $ref: "#/components/headers/ClearedCookies" }
+
+  /auth/me:
+    get:
+      tags: [Auth]
+      operationId: getCurrentUser
+      summary: Get the signed-in user
+      responses:
+        "200":
+          description: The current user.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+
+  /users:
+    get:
+      tags: [Users]
+      operationId: listUsers
+      summary: List users (admin)
+      description: Newest first.
+      parameters:
+        - name: role
+          in: query
+          required: false
+          schema: { $ref: "#/components/schemas/Role" }
+      responses:
+        "200":
+          description: Users.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/Validation" }
+    post:
+      tags: [Users]
+      operationId: createTeamMember
+      summary: Add an agent or admin (admin)
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateUserRequest" }
+            example: { email: maya@cs-odds.example, name: Maya Chen, password: correct horse battery, role: agent }
+      responses:
+        "201":
+          description: Team member created. They can sign in straight away.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409":
+          description: An account with this email already exists.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "422":
+          description: Invalid input, or `role` is `customer` (customers sign up themselves).
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /agents:
+    get:
+      tags: [Users]
+      operationId: listTeam
+      summary: List agents and admins (staff)
+      description: Everyone a ticket can be assigned to, sorted by name.
+      responses:
+        "200":
+          description: Team members.
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/User" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /tickets:
+    get:
+      tags: [Tickets]
+      operationId: listTickets
+      summary: List and search tickets
+      description: |
+        Customers always get only their own tickets, and the `assignee` filter
+        is ignored for them.
+
+        Common agent views:
+        - My open: `status=open,pending,on_hold&assignee=me`
+        - Unassigned: `status=open,pending,on_hold&assignee=unassigned`
+        - Solved: `status=solved,closed&sort=recent`
+      parameters:
+        - name: status
+          in: query
+          description: Comma-separated statuses. Omit for any status.
+          schema: { type: string, example: "open,pending,on_hold" }
+        - name: priority
+          in: query
+          schema: { $ref: "#/components/schemas/Priority" }
+        - name: assignee
+          in: query
+          description: "`me`, `unassigned`, or a user id (staff only)."
+          schema: { type: string, example: me }
+        - name: q
+          in: query
+          description: >
+            Matches the subject, the requester's name or email (case-insensitive,
+            `%` and `_` are literal), or a ticket number (`1042`, `#1042`, `TKT-1042`).
+          schema: { type: string }
+        - name: sort
+          in: query
+          description: "`priority`: most urgent first, then oldest first. `recent`: most recently updated first."
+          schema: { type: string, enum: [priority, recent], default: priority }
+        - name: page
+          in: query
+          description: 1-based. Values below 1 are treated as 1.
+          schema: { type: integer, minimum: 1, default: 1 }
+        - name: perPage
+          in: query
+          description: Values above 100 are capped at 100.
+          schema: { type: integer, minimum: 1, maximum: 100, default: 25 }
+      responses:
+        "200":
+          description: One page of tickets.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TicketPage" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "422": { $ref: "#/components/responses/Validation" }
+    post:
+      tags: [Tickets]
+      operationId: createTicket
+      summary: Create a ticket
+      description: |
+        - **Customers** create a ticket for themselves (channel `portal`). They
+          must not send `requesterEmail`, `requesterName` or `assigneeId`.
+        - **Staff** create a ticket for a customer (channel `agent`), for example
+          after a phone call. The customer is found by `requesterEmail`, or created
+          without a password if new. In that case `requesterName` is required.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateTicketRequest" }
+            examples:
+              customer:
+                summary: Customer, from the portal
+                value: { subject: Password reset link says it has expired, description: Every reset link says it has expired., priority: high }
+              staff:
+                summary: Agent, on behalf of a customer
+                value:
+                  subject: Invoice PDF shows the wrong company address
+                  description: Logged from a phone call.
+                  priority: normal
+                  requesterEmail: marcus@pinecrest.example
+                  requesterName: Marcus Lee
+                  assigneeId: 5b2f8a2e-8f3c-4c55-9a55-2d6c1f0e9b11
+      responses:
+        "201":
+          description: Ticket created.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TicketDetail" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "422": { $ref: "#/components/responses/Validation" }
+
+  /tickets/counts:
+    get:
+      tags: [Tickets]
+      operationId: getTicketCounts
+      summary: Counts for the agent sidebar (staff)
+      responses:
+        "200":
+          description: Ticket counts per view.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ViewCounts" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /tickets/{number}:
+    parameters:
+      - $ref: "#/components/parameters/TicketNumber"
+    get:
+      tags: [Tickets]
+      operationId: getTicket
+      summary: Get a ticket with its conversation
+      description: Customers get public replies and status changes only.
+      responses:
+        "200":
+          description: The ticket.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TicketDetail" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    patch:
+      tags: [Tickets]
+      operationId: updateTicket
+      summary: Change status, priority or assignee
+      description: |
+        Only the fields sent are changed, and each real change is added to the
+        ticket's history.
+        - **Staff** can change any field. Send `"assigneeId": null` to unassign.
+        - **Customers** can only send `{ "status": "solved" }` on their own active ticket.
+
+        Closed tickets can't be changed (`409`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/UpdateTicketRequest" }
+            examples:
+              solve: { value: { status: solved } }
+              reprioritise: { value: { priority: urgent } }
+              unassign: { value: { assigneeId: null } }
+      responses:
+        "200":
+          description: The updated ticket.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TicketDetail" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/TicketClosed" }
+        "422":
+          description: Invalid value, or the assignee is not an agent or admin.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+
+  /tickets/{number}/comments:
+    parameters:
+      - $ref: "#/components/parameters/TicketNumber"
+    post:
+      tags: [Tickets]
+      operationId: addComment
+      summary: Reply or add an internal note
+      description: |
+        - **Customer reply**: reopens the ticket (status back to `open`) unless it's already open.
+          A reply to a `solved` ticket reopens it.
+        - **Staff reply** (`internal: false`): assigns an unassigned ticket to the
+          author, and optionally sets `status` in the same step (for example `pending`).
+        - **Internal note** (`internal: true`, staff only): never shown to the customer.
+
+        Closed tickets don't accept replies (`409`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AddCommentRequest" }
+            examples:
+              reply: { value: { body: Here is a one-time link., status: pending } }
+              note: { value: { body: Known Outlook Safe Links issue., internal: true } }
+      responses:
+        "201":
+          description: Comment added. Returns the updated ticket.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TicketDetail" }
+        "401": { $ref: "#/components/responses/Unauthorized" }
+        "403":
+          description: A customer tried to post an internal note or set a status.
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Error" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/TicketClosed" }
+        "422": { $ref: "#/components/responses/Validation" }
+
+components:
+  securitySchemes:
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: cs_access
+      description: JWT access token set by sign-in. Sent automatically by browsers.
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: The same access token, for non-browser clients.
+    refreshCookie:
+      type: apiKey
+      in: cookie
+      name: cs_refresh
+      description: Single-use refresh token set by sign-in.
+
+  parameters:
+    TicketNumber:
+      name: number
+      in: path
+      required: true
+      description: Ticket number, with or without the `TKT-` prefix. Anything else returns `404`.
+      schema: { type: string, example: TKT-1042 }
+
+  headers:
+    SessionCookies:
+      description: Sets `cs_access` and `cs_refresh` (HttpOnly; SameSite=Lax; Path=/; Secure when `COOKIE_SECURE=true`).
+      schema: { type: string }
+    ClearedCookies:
+      description: Expires `cs_access` and `cs_refresh` (Max-Age=0).
+      schema: { type: string }
+
+  responses:
+    Validation:
+      description: The input is invalid. `code` is `validation`.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: { code: validation, message: Use at least 10 characters for your password. } }
+    Unauthorized:
+      description: Not signed in, or the access token expired. Refresh and retry.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: { code: unauthorized, message: Your session has ended. Sign in again. } }
+    Forbidden:
+      description: Signed in, but this role can't do that.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: { code: forbidden, message: "You don't have permission to do that." } }
+    NotFound:
+      description: No such ticket, or it belongs to another customer.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: { code: not_found, message: "We couldn't find that." } }
+    TicketClosed:
+      description: The ticket is closed and can't be changed.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+          example: { error: { code: conflict, message: "This ticket is closed, so it can't be changed. Open a new ticket instead." } }
+    Internal:
+      description: Unexpected server error. Details are logged, not returned.
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/Error" }
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: object
+          required: [code, message]
+          properties:
+            code:
+              type: string
+              enum: [validation, invalid_credentials, unauthorized, forbidden, not_found, conflict, internal]
+            message:
+              type: string
+              description: Written for end users; safe to display.
+
+    HealthReport:
+      type: object
+      required: [status, database]
+      properties:
+        status: { type: string, const: ok }
+        database: { type: string, const: ok }
+
+    Role:
+      type: string
+      enum: [admin, agent, customer]
+
+    User:
+      type: object
+      required: [id, email, name, role, createdAt]
+      properties:
+        id: { type: string, format: uuid }
+        email: { type: string, format: email, description: Always lower-case. }
+        name: { type: string }
+        role: { $ref: "#/components/schemas/Role" }
+        createdAt: { type: string, format: date-time }
+
+    Session:
+      type: object
+      description: Tokens are only in cookies, never in the body.
+      required: [user, accessExpiresAt]
+      properties:
+        user: { $ref: "#/components/schemas/User" }
+        accessExpiresAt: { type: string, format: date-time }
+
+    Password:
+      type: string
+      minLength: 10
+      maxLength: 128
+      description: 10–128 characters, not only spaces.
+
+    RegisterRequest:
+      type: object
+      required: [email, name, password]
+      properties:
+        email: { type: string, format: email, maxLength: 254 }
+        name: { type: string, minLength: 1, maxLength: 100 }
+        password: { $ref: "#/components/schemas/Password" }
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email: { type: string }
+        password: { type: string }
+
+    CreateUserRequest:
+      type: object
+      required: [email, name, password, role]
+      properties:
+        email: { type: string, format: email, maxLength: 254 }
+        name: { type: string, minLength: 1, maxLength: 100 }
+        password: { $ref: "#/components/schemas/Password" }
+        role: { type: string, enum: [agent, admin] }
+
+    TicketStatus:
+      type: string
+      enum: [open, pending, on_hold, solved, closed]
+      description: |
+        - `open`: needs a reply from the team
+        - `pending`: waiting on the customer
+        - `on_hold`: waiting on a third party
+        - `solved`: resolved; a customer reply reopens it
+        - `closed`: archived; can't be changed
+
+    Priority:
+      type: string
+      enum: [low, normal, high, urgent]
+
+    Channel:
+      type: string
+      enum: [portal, email, agent]
+      description: "`agent` means a team member created it for the customer."
+
+    UserRef:
+      type: object
+      required: [id, name, email, role]
+      properties:
+        id: { type: string, format: uuid }
+        name: { type: string }
+        email: { type: string, format: email }
+        role: { $ref: "#/components/schemas/Role" }
+
+    TicketSummary:
+      type: object
+      required: [number, subject, status, priority, channel, requester, assignee, createdAt, updatedAt]
+      properties:
+        number: { type: integer, format: int64, description: Shown as `TKT-<number>`., example: 1042 }
+        subject: { type: string }
+        status: { $ref: "#/components/schemas/TicketStatus" }
+        priority: { $ref: "#/components/schemas/Priority" }
+        channel: { $ref: "#/components/schemas/Channel" }
+        requester: { $ref: "#/components/schemas/UserRef" }
+        assignee:
+          oneOf:
+            - { $ref: "#/components/schemas/UserRef" }
+            - { type: "null" }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+
+    TimelineComment:
+      type: object
+      required: [type, id, author, body, internal, createdAt]
+      properties:
+        type: { type: string, const: comment }
+        id: { type: string, format: uuid }
+        author: { $ref: "#/components/schemas/UserRef" }
+        body: { type: string }
+        internal: { type: boolean, description: Internal notes are only returned to staff. }
+        createdAt: { type: string, format: date-time }
+
+    TimelineEvent:
+      type: object
+      required: [type, id, actor, kind, oldValue, newValue, createdAt]
+      properties:
+        type: { type: string, const: event }
+        id: { type: string, format: uuid }
+        actor:
+          oneOf:
+            - { $ref: "#/components/schemas/UserRef" }
+            - { type: "null" }
+        kind:
+          type: string
+          enum: [status_changed, priority_changed, assignee_changed]
+          description: Customers only receive `status_changed`.
+        oldValue:
+          type: [string, "null"]
+          description: A status or priority code, or a person's name for `assignee_changed` (null means unassigned).
+        newValue:
+          type: [string, "null"]
+        createdAt: { type: string, format: date-time }
+
+    TimelineItem:
+      oneOf:
+        - { $ref: "#/components/schemas/TimelineComment" }
+        - { $ref: "#/components/schemas/TimelineEvent" }
+      discriminator:
+        propertyName: type
+        mapping:
+          comment: "#/components/schemas/TimelineComment"
+          event: "#/components/schemas/TimelineEvent"
+
+    TicketDetail:
+      allOf:
+        - { $ref: "#/components/schemas/TicketSummary" }
+        - type: object
+          required: [description, resolvedAt, timeline, requesterTicketCount]
+          properties:
+            description: { type: string, description: The requester's first message. }
+            resolvedAt:
+              type: [string, "null"]
+              format: date-time
+              description: Set when solved, cleared when reopened.
+            timeline:
+              type: array
+              description: Oldest first. A reply comes before the status change it caused.
+              items: { $ref: "#/components/schemas/TimelineItem" }
+            requesterTicketCount: { type: integer, format: int64 }
+
+    TicketPage:
+      type: object
+      required: [items, total, page, perPage]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/TicketSummary" }
+        total: { type: integer, format: int64, description: Matching tickets across all pages. }
+        page: { type: integer }
+        perPage: { type: integer }
+
+    ViewCounts:
+      type: object
+      description: Active means open, pending or on hold.
+      required: [mine, unassigned, open, solved]
+      properties:
+        mine: { type: integer, format: int64, description: Active tickets assigned to the caller. }
+        unassigned: { type: integer, format: int64, description: Active tickets with no assignee. }
+        open: { type: integer, format: int64, description: All active tickets. }
+        solved: { type: integer, format: int64, description: Solved or closed tickets. }
+
+    CreateTicketRequest:
+      type: object
+      required: [subject, description]
+      properties:
+        subject: { type: string, minLength: 1, maxLength: 200, description: Extra whitespace is collapsed. }
+        description: { type: string, minLength: 1, maxLength: 20000 }
+        priority:
+          allOf: [{ $ref: "#/components/schemas/Priority" }]
+          default: normal
+        requesterEmail: { type: string, format: email, description: Staff only. The customer the ticket is for. }
+        requesterName: { type: string, maxLength: 100, description: Staff only. Required when the customer is new. }
+        assigneeId: { type: string, format: uuid, description: Staff only. Must be an agent or admin. }
+
+    UpdateTicketRequest:
+      type: object
+      minProperties: 1
+      properties:
+        status: { $ref: "#/components/schemas/TicketStatus" }
+        priority: { $ref: "#/components/schemas/Priority" }
+        assigneeId:
+          type: [string, "null"]
+          format: uuid
+          description: A team member's id, or `null` to unassign. Omit to keep the current assignee.
+
+    AddCommentRequest:
+      type: object
+      required: [body]
+      properties:
+        body: { type: string, minLength: 1, maxLength: 20000 }
+        internal: { type: boolean, default: false, description: Staff only. }
+        status:
+          allOf: [{ $ref: "#/components/schemas/TicketStatus" }]
+          description: Staff only. Status to set together with the reply.

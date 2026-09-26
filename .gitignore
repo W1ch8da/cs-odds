@@ -12,3 +12,6 @@ frontend/out/
 frontend/.yarn/*
 !frontend/.yarn/releases
 frontend/.pnp.*
+
+# Generated API docs (redocly build-docs)
+api-docs.html
