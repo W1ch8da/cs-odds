@@ -1,0 +1,44 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT\n                 count(*) FILTER (WHERE status IN ('open', 'pending', 'on_hold') AND assignee_id = $1) AS \"mine!\",\n                 count(*) FILTER (WHERE status IN ('open', 'pending', 'on_hold') AND assignee_id IS NULL) AS \"unassigned!\",\n                 count(*) FILTER (WHERE status IN ('open', 'pending', 'on_hold')) AS \"open!\",\n                 count(*) FILTER (WHERE status IN ('solved', 'closed')) AS \"solved!\"\n               FROM tickets",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "mine!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "unassigned!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "open!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "solved!",
+        "type_info": "Int8",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "0874e1a1b71f1bfd194db24020c42a7fb486529fe86403bc884886dd58bdd812"
+}

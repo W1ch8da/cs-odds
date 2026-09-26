@@ -1,0 +1,19 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "UPDATE tickets\n           SET status = $2::text::ticket_status, priority = $3::text::ticket_priority,\n               assignee_id = $4, updated_at = $5, resolved_at = $6\n           WHERE id = $1",
+  "describe": {
+    "columns": [],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Text",
+        "Text",
+        "Uuid",
+        "Timestamptz",
+        "Timestamptz"
+      ]
+    },
+    "nullable": []
+  },
+  "hash": "84a9cf819d508d74aee5a81d05ce9ccb949393805f31df524a3efac26779621a"
+}

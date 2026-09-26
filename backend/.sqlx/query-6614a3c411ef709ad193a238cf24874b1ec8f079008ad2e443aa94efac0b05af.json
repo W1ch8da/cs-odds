@@ -1,0 +1,101 @@
+{
+  "db_name": "PostgreSQL",
+  "query": "SELECT item_id AS \"id!\", sort_key AS \"sort_key!\", created_at AS \"created_at!\",\n                      body AS \"body?\", internal AS \"internal?\", kind AS \"kind?\",\n                      old_value AS \"old_value?\", new_value AS \"new_value?\",\n                      user_id AS \"user_id?\", user_name AS \"user_name?\", user_email AS \"user_email?\",\n                      user_role AS \"user_role?\"\n               FROM (\n                 SELECT c.id AS item_id, 0 AS sort_key, c.created_at, c.body, c.is_internal AS internal,\n                        NULL::text AS kind, NULL::text AS old_value, NULL::text AS new_value,\n                        u.id AS user_id, u.name AS user_name, u.email AS user_email, u.role::text AS user_role\n                 FROM ticket_comments c\n                 JOIN users u ON u.id = c.author_id\n                 WHERE c.ticket_id = $1 AND ($2 OR NOT c.is_internal)\n                 UNION ALL\n                 SELECT e.id, 1, e.created_at, NULL, NULL, e.kind,\n                        CASE WHEN e.kind = 'assignee_changed' THEN ou.name ELSE e.old_value END,\n                        CASE WHEN e.kind = 'assignee_changed' THEN nu.name ELSE e.new_value END,\n                        u.id, u.name, u.email, u.role::text\n                 FROM ticket_events e\n                 LEFT JOIN users u ON u.id = e.actor_id\n                 LEFT JOIN users ou ON e.kind = 'assignee_changed' AND ou.id::text = e.old_value\n                 LEFT JOIN users nu ON e.kind = 'assignee_changed' AND nu.id::text = e.new_value\n                 WHERE e.ticket_id = $1\n               ) items\n               ORDER BY created_at, sort_key",
+  "describe": {
+    "columns": [
+      {
+        "ordinal": 0,
+        "name": "id!",
+        "type_info": "Uuid",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 1,
+        "name": "sort_key!",
+        "type_info": "Int4",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 2,
+        "name": "created_at!",
+        "type_info": "Timestamptz",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 3,
+        "name": "body?",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 4,
+        "name": "internal?",
+        "type_info": "Bool",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 5,
+        "name": "kind?",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 6,
+        "name": "old_value?",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 7,
+        "name": "new_value?",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 8,
+        "name": "user_id?",
+        "type_info": "Uuid",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 9,
+        "name": "user_name?",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 10,
+        "name": "user_email?",
+        "type_info": "Text",
+        "origin": "Expression"
+      },
+      {
+        "ordinal": 11,
+        "name": "user_role?",
+        "type_info": "Text",
+        "origin": "Expression"
+      }
+    ],
+    "parameters": {
+      "Left": [
+        "Uuid",
+        "Bool"
+      ]
+    },
+    "nullable": [
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null,
+      null
+    ]
+  },
+  "hash": "6614a3c411ef709ad193a238cf24874b1ec8f079008ad2e443aa94efac0b05af"
+}

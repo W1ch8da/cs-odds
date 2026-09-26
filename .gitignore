@@ -1,0 +1,14 @@
+.DS_Store
+.env
+.env.local
+
+# Rust
+backend/target/
+
+# Next.js
+frontend/node_modules/
+frontend/.next/
+frontend/out/
+frontend/.yarn/*
+!frontend/.yarn/releases
+frontend/.pnp.*
